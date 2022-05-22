@@ -26,6 +26,16 @@ def get_path() -> pathlib.Path:
     return cache_path
 
 
+def file_md5(file_path: str, trunk_size: int = 1024 * 100):
+    md5 = hashlib.md5()
+    with open(file_path, 'rb') as f:
+        content = f.read(trunk_size)
+        while content:
+            md5.update(content)
+            content = f.read(trunk_size)
+    return md5.hexdigest()
+
+
 class StoreClass:  # pragma: no cover
     def __init__(self, file_path: str, mode: str):
         raise NotImplementedError
@@ -69,9 +79,9 @@ class PandasStore(pd.HDFStore):
 
 
 def add_metadata(
-    group: Union[h5py.Group, PandasGroup],
-    func: cache_able_function,
-    metadata: Dict[str, str] = None,
+        group: Union[h5py.Group, PandasGroup],
+        func: cache_able_function,
+        metadata: Dict[str, str] = None,
 ):
     metadata = metadata if metadata is not None else {}
     group.attrs["metadata_function_name"] = func.__name__
@@ -95,7 +105,7 @@ def read_metadata(path: str) -> Dict[str, Dict[str, str]]:
 
 
 def extract_args(
-    func: cache_able_function, args: List[str], f_args: Tuple[Any], f_kwargs: Dict[str, Any]
+        func: cache_able_function, args: List[str], f_args: Tuple[Any], f_kwargs: Dict[str, Any]
 ) -> Dict[str, Any]:
     """Extracts arguments names from the function and pairs them with the corresponding values in a
     dictionary.
@@ -117,14 +127,14 @@ def extract_args(
         **defaults,
         **f_kwargs,
         **dict(zip(argspec.args, f_args)),
-        **{"arglist": f_args[len(argspec.args) :]},
+        **{"arglist": f_args[len(argspec.args):]},
     }
     full_args = full_args if not args else {arg: full_args[arg] for arg in args}
     full_args.pop("self", "")
     return full_args
 
 
-def store_factory(data_storer: Type[StoreClass],) -> Type[store_function]:
+def store_factory(data_storer: Type[StoreClass], ) -> Type[store_function]:
     """Factory function for creating storing functions for the cache decorator.
 
     Args:
@@ -135,12 +145,13 @@ def store_factory(data_storer: Type[StoreClass],) -> Type[store_function]:
     """
 
     def store_func(
-        func_key: str,
-        arg_key: str,
-        func: cache_able_function,
-        f_args: Tuple[Any],
-        f_kwargs: Dict[str, Any],
-        metadata: Dict[str, str] = None,
+            func_key: str,
+            arg_key: str,
+            files_key: str,
+            func: cache_able_function,
+            f_args: Tuple[Any],
+            f_kwargs: Dict[str, Any],
+            metadata: Dict[str, str] = None,
     ) -> cached_data_type:
         """Retrieves stored data if key exists in stored data if the key is new, retrieves data from
         decorated function & stores the result with the given key.
@@ -148,6 +159,7 @@ def store_factory(data_storer: Type[StoreClass],) -> Type[store_function]:
         Args:
             func_key: unique key generated from function source
             arg_key: unique key generated from function arguments
+            files_key: unique key generated from the files used by the function
             func: original cached function
             f_args: args to pass to the function
             f_kwargs: kwargs to pass to the function
@@ -158,7 +170,7 @@ def store_factory(data_storer: Type[StoreClass],) -> Type[store_function]:
 
         """
         file_path = get_path() / "data.h5"
-        path = f"/{func_key}/{arg_key}"
+        path = f"/{func_key}/{arg_key}/{files_key}"
         suffix = "/array" if issubclass(data_storer, h5py.File) else ""
         with data_storer(file_path, mode="a") as store:
             if store.__contains__(path):
@@ -184,7 +196,7 @@ def store_factory(data_storer: Type[StoreClass],) -> Type[store_function]:
 def cache_decorator_factory(table_getter: Type[store_function]) -> Type[cache_able_function]:
     # pylint: disable=keyword-arg-before-vararg
     def cache_decorator(
-        orig_func: cache_able_function = None, *args: str
+            orig_func: cache_able_function = None, *args: str, file_args: List[str] = None
     ) -> Type[cache_able_function]:
         if isinstance(orig_func, str):
             args = list(args) + [orig_func]
@@ -207,9 +219,20 @@ def cache_decorator_factory(table_getter: Type[store_function]) -> Type[cache_ab
                     return func(*f_args, **f_kwargs)
                 extracted_args = extract_args(func, args, f_args, f_kwargs)
                 extracted_args = {k: str(v) for k, v in extracted_args.items()}
+                file_hash_dict = {}
+                for i in sorted(file_args):
+                    try:
+                        file_path = extracted_args[i]
+                        file_hash_dict[i] = file_md5(file_path)
+                    except KeyError:
+                        raise KeyError(f'function:<{func.__name__}> dont have arg named:<{i}>')
+                    except FileNotFoundError:
+                        raise FileNotFoundError(
+                            f'the file:<{i}={file_path}> passed to func:<{func.__name__}> dont exits')
                 group = "a" + hashlib.md5(inspect.getsource(func).encode("utf-8")).hexdigest()
                 key = "a" + hashlib.md5(json.dumps(extracted_args).encode("utf-8")).hexdigest()
-                return table_getter(group, key, func, f_args, f_kwargs, extracted_args)
+                files_key = "a" + hashlib.md5(json.dumps(file_hash_dict).encode("utf-8")).hexdigest()
+                return table_getter(group, key, files_key, func, f_args, f_kwargs, extracted_args)
 
             return wrapped
 
